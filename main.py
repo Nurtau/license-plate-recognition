@@ -1,4 +1,6 @@
 import cv2
+import sys
+import os
 import numpy as np
 import pytesseract
 
@@ -6,14 +8,7 @@ def crop_license_plate(gray_plate):
     blurred = cv2.GaussianBlur(gray_plate, (5, 5), 0)
     _, binarized = cv2.threshold(cv2.equalizeHist(blurred), 150, 255, cv2.THRESH_BINARY)
 
-    edges = cv2.Canny(binarized, 100, 200)
-    cv2.imshow("binarized", binarized)
-    cv2.imshow("edges", edges)
-
-    cv2.imwrite("generated/binarized.jpg", binarized)
-    cv2.imwrite("generated/edges.jpg", edges)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(binarized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         return None
@@ -24,22 +19,20 @@ def crop_license_plate(gray_plate):
         x, y, w, h = cv2.boundingRect(countor)
         cropped = gray_plate[y:y+h, x:x+w]
         cropped_images.append(cropped)
-        cv2.imwrite("generated/crops-" + str(x) + ".jpg", cropped)
 
 
     return cropped_images
 
-def segment_into_characters(gray_plate):
+def segment_into_characters(gray_plate, char_transformation):
     all_segments = []
 
     cropped_images = crop_license_plate(gray_plate)
 
     for i, cropped in enumerate(cropped_images):
         blurred = cv2.bilateralFilter(cropped, 5, 17, 17)
-        _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
-        cv2.imshow(str(i), thresh)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        _, binarized = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
 
+        contours, _ = cv2.findContours(binarized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         char_candidates = []
 
         for contour in contours:
@@ -56,56 +49,50 @@ def segment_into_characters(gray_plate):
         segments = []
         for (x, y, w, h) in char_candidates:
             segment = cropped[y:y+h, x:x+w]
-            cv2.imwrite("generated/raw-" + str(x) + ".jpg", segment)
+
             _, binarized = cv2.threshold(segment, 140, 255, cv2.THRESH_BINARY)
-            padded_image = cv2.copyMakeBorder(binarized, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255])
-            segments.append(padded_image)
-            cv2.imwrite("generated/edited-" + str(x) + ".jpg", padded_image)
+            enhanced_segment = cv2.copyMakeBorder(binarized, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255])
+        
+            enhanced_segment = cv2.bitwise_not(enhanced_segment)
+
+            kernel_size = 3
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+
+            if char_transformation == "erode":
+                enhanced_segment = cv2.erode(enhanced_segment, kernel, iterations=1)
+            elif char_transformation == "dilate":
+                enhanced_segment = cv2.dilate(enhanced_segment, kernel, iterations=1)
+
+            enhanced_segment = cv2.bitwise_not(enhanced_segment)
+            segments.append(enhanced_segment)
 
         all_segments.append(segments)
 
     return all_segments
 
 
-def salt_pepper_noise(image, salt_prob, pepper_prob):
-    noisy_image = np.copy(image)
-    total_pixels = image.size // 3  # Divide by 3 for RGB images
-
-    num_salt = np.ceil(salt_prob * total_pixels).astype(int)
-    coords = [np.random.randint(0, i - 1, num_salt) for i in image.shape]
-    noisy_image[coords[0], coords[1], :] = 255
-
-    num_pepper = np.ceil(pepper_prob * total_pixels).astype(int)
-    coords = [np.random.randint(0, i - 1, num_pepper) for i in image.shape]
-    noisy_image[coords[0], coords[1], :] = 0
-
-    return noisy_image
-
 def median_filter(image, kernel_size):
     filtered_image = cv2.medianBlur(image, kernel_size)
     return filtered_image
 
-def main():
-    image = cv2.imread('noisy.jpg')
-    #image = salt_pepper_noise(image, 0.05, 0.03)
-
-    #cv2.imwrite("generated/noisy.jpg", image)
-    cv2.imshow("noisy", image)
+def recognize_license_plate(path, char_transformation):
+    image = cv2.imread(path)
     image = median_filter(image, 3)
-
-    cv2.imshow("median", image)
-    cv2.imwrite("generated/median.jpg", image)
 
     gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     plate_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_russian_plate_number.xml")
     plates = plate_cascade.detectMultiScale(image, 1.1, 40)
 
-    for (x, y, w, h) in plates:
-        cv2.imwrite("detected-license-plate.jpg", image[y:y+h, x:x+w])
-        gray_plate = gray_image[y:y+h, x:x+w]
-        all_segments = segment_into_characters(gray_plate)
-        longest_chars = []
+    path_title = f"recognized license plate of {path}: "
 
+    if len(plates) == 0:
+        print(path_title, "Not found")
+
+    for (x, y, w, h) in plates:
+        gray_plate = gray_image[y:y+h, x:x+w]
+
+        all_segments = segment_into_characters(gray_plate, char_transformation)
+        longest_chars = []
 
         for segments in all_segments:
             chars = []
@@ -119,26 +106,48 @@ def main():
             if len(chars) > len(longest_chars):
                 longest_chars = chars
 
-        print("Detected license plate:", "".join(longest_chars));
+        print(path_title, "".join(longest_chars))
 
-        cv2.rectangle(image, (x, y), (x + w, y + h), (255, 0, 0), 2)
+        cv2.rectangle(image, (x, y), (x + w, y + h), (255, 0, 0), 6)
 
-    cv2.imshow('Detected Plates', image)
-    cv2.imwrite("generated/detection.jpg", image)
+        recognized_license_plate = "".join(longest_chars)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 2
+        font_color = (0, 255, 0)
+        line_thickness = 6
+        cv2.putText(image, recognized_license_plate, (x, y + h + 60), font, font_scale, font_color, line_thickness)
+
+    cv2.imshow(path, image)
+
+def get_directories(path):
+    return [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+
+def get_images(path):
+    image_extensions = [".jpg", ".jpeg", ".png"]
+    return [file for file in os.listdir(path) if os.path.splitext(file)[1].lower() in image_extensions]
+
+
+def main():
+    # variants: "erode", "dilate" or "none"
+    char_transformation = "none"
+
+    if "--char-transformation" in sys.argv:
+        index = sys.argv.index("--char-transformation") + 1
+        char_transformation = sys.argv[index] if index < len(sys.argv) else "none"
+
+    noisy_images_folder = "noisy-images"
+    directories = get_directories(noisy_images_folder)
+
+    for dir in directories:
+      print("-------------------------------------------------")
+
+      image_paths = get_images(os.path.join(noisy_images_folder, dir))
+      image_paths.sort()
+
+      for image_path in image_paths:
+        recognize_license_plate(os.path.join(noisy_images_folder, dir, image_path), char_transformation)
+
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-
-def main_for_noise():
-    image = cv2.imread('car8.jpg')
-    noisy_image = salt_pepper_noise(image, 0.05, 0.05)
-    cv2.imshow("noisy", noisy_image)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-def main_binarizer():
-    image = cv2.imread('graph.png')
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, binarized = cv2.threshold(gray_image, 150, 255, cv2.THRESH_BINARY)
-    cv2.imwrite("binarized.jpg", binarized)
 
 main()
